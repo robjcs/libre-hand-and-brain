@@ -1,14 +1,13 @@
 import os
 import json
-import time
 import requests
 import chess
-import chess.engine
 from stockfish import Stockfish
 from dotenv import load_dotenv
 import threading
 import logging
-import random
+
+from chat_engine import ChatEngine
 
 load_dotenv()
 
@@ -20,65 +19,16 @@ class LichessHandBrainBot:
         self.token = os.getenv('LICHESS_TOKEN')
         self.bot_stockfish_level = int(os.getenv('STOCKFISH_LEVEL', 4))
         self.suggestion_stockfish_level = int(os.getenv('SUGGESTION_STOCKFISH_LEVEL', 15))
+        self.bot_username = os.getenv('BOT_USERNAME', 'HandAndBrainBot')
         self.base_url = 'https://lichess.org'
         self.session = requests.Session()
         self.session.headers.update({'Authorization': f'Bearer {self.token}'})
         self.bot_stockfish = None
         self.suggestion_stockfish = None
         self.active_games = {}
+        self.bot_message_cache = {}  # Cache of messages sent by bot per game
 
-        self.piece_suggestions = [
-            "Hmm... I think you should move your {piece_name}",
-            "How about the {piece_name}?",
-            "Let's try moving a {piece_name}",
-            "I'm feeling the {piece_name} here",
-            "The {piece_name} looks promising",
-            "Go with your {piece_name}",
-            "Time for the {piece_name} to shine",
-            "Your {piece_name} is calling",
-            "I'd say {piece_name}",
-            "Maybe the {piece_name}?",
-            "The {piece_name} seems right",
-            "Let's unleash the {piece_name}",
-            "How about we move a {piece_name}?",
-            "I'm thinking {piece_name}",
-            "The {piece_name} could work well",
-            "Try your {piece_name}",
-            "What about the {piece_name}?",
-            "I vote for the {piece_name}",
-            "Let's go with the {piece_name}",
-            "The {piece_name} is the move",
-            "Move that {piece_name}!",
-            "I'd pick the {piece_name}",
-            "The {piece_name} looks good",
-            "Use your {piece_name} here",
-            "Let's see... the {piece_name}",
-            "I'm leaning toward the {piece_name}",
-            "The {piece_name}, definitely",
-            "Trust me, move the {piece_name}",
-            "The {piece_name} is perfect here",
-            "I say we go {piece_name}",
-            "The {piece_name} has potential",
-            "Let's deploy the {piece_name}",
-            "The {piece_name} is your best bet",
-            "I'd recommend the {piece_name}",
-            "How about a {piece_name} move?",
-            "The {piece_name} looks juicy",
-            "Let's activate the {piece_name}",
-            "The {piece_name} feels right",
-            "I'm seeing {piece_name} energy",
-            "Go for the {piece_name}",
-            "The {piece_name} is begging to move",
-            "I'd move the {piece_name}",
-            "Let's bring out the {piece_name}",
-            "The {piece_name} is the play",
-            "My instinct says {piece_name}",
-            "The {piece_name} would be nice",
-            "Let's make a {piece_name} move",
-            "I'm getting {piece_name} vibes",
-            "The {piece_name}, no doubt",
-            "The {piece_name} is key here"
-        ]
+        self.chat = ChatEngine()
         
     def init_stockfish(self):
         try:
@@ -135,6 +85,12 @@ class LichessHandBrainBot:
             response = self.session.post(url, data=data)
             if response.status_code == 200:
                 logger.info(f"Chat message sent: {text}")
+                
+                # Cache the message sent by bot
+                if game_id not in self.bot_message_cache:
+                    self.bot_message_cache[game_id] = []
+                self.bot_message_cache[game_id].append(text)
+                
             else:
                 logger.error(f"Failed to send chat message: {response.status_code}")
         except Exception as e:
@@ -194,7 +150,10 @@ class LichessHandBrainBot:
                 
                 if suggested_move:
                     piece_name = self.get_piece_name(suggested_move, board)
-                    message = random.choice(self.piece_suggestions).format(piece_name=piece_name)
+                    # Get cached messages for this game to avoid repetition
+                    cached_messages = self.bot_message_cache.get(game_id, [])
+                    logger.info(f"Current cache for game {game_id}: {cached_messages}")
+                    message = self.chat.generate_move_hint_message(piece_name, cached_messages)
                     self.send_chat_message(game_id, message)
                     logger.info(f"Suggested to opponent: {suggested_move} ({piece_name})")
                     
@@ -204,6 +163,11 @@ class LichessHandBrainBot:
     def stream_game_events(self, game_id):
         url = f"{self.base_url}/api/bot/game/stream/{game_id}"
         bot_color = None
+
+        # Get cached messages for this game to avoid repetition
+        cached_messages = self.bot_message_cache.get(game_id, [])
+        message = self.chat.generate_chat_response("Let's have a great game! Make your move soon!", cached_messages)
+        self.send_chat_message(game_id, message)
         
         try:
             with self.session.get(url, stream=True) as response:
@@ -236,6 +200,19 @@ class LichessHandBrainBot:
                             elif event_type == 'gameState':
                                 self.handle_game_state(game_id, event, bot_color)
                                 
+                            elif event_type == 'chatLine':
+                                username = event.get('username', 'Unknown')
+                                if username != self.bot_username:
+                                    text = event.get('text', '')
+                                    room = event.get('room', 'player')
+                                
+                                    logger.info(f"Chat from {username} in {room}: {text}")
+
+                                    # Get cached messages for this game to avoid repetition
+                                    cached_messages = self.bot_message_cache.get(game_id, [])
+                                    logger.info(f"Current cache for game {game_id}: {cached_messages}")
+                                    message = self.chat.generate_chat_response(text, cached_messages)
+                                    self.send_chat_message(game_id, message)
                         except json.JSONDecodeError:
                             continue
                             
@@ -280,7 +257,6 @@ class LichessHandBrainBot:
                                 game_id = game.get('id')
                                 if game_id:
                                     logger.info(f"Game {game_id} started")
-                                    self.send_chat_message(game_id, "Good luck! Let's have a great game! :)")
                                     thread = threading.Thread(
                                         target=self.stream_game_events, 
                                         args=(game_id,)
