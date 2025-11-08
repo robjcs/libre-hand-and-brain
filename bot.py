@@ -26,19 +26,19 @@ class LichessHandBrainBot:
         self.bot_stockfish = None
         self.suggestion_stockfish = None
         self.active_games = {}
-        self.bot_message_cache = {}  # Cache of messages sent by bot per game
+        self.bot_message_cache = {} # dont repeat messages in the same game
 
         self.chat = ChatEngine()
         
     def init_stockfish(self):
         try:
-            # Bot's engine for making moves
+            # Bot's engine -- weak
             self.bot_stockfish = Stockfish()
-            self.bot_stockfish.set_depth(self.bot_stockfish_level)
+            self.bot_stockfish.set_skill_level(self.bot_stockfish_level)
             
             # Stronger engine for suggestions to opponent
             self.suggestion_stockfish = Stockfish()
-            self.suggestion_stockfish.set_depth(self.suggestion_stockfish_level)
+            self.suggestion_stockfish.set_skill_level(self.suggestion_stockfish_level)
             
             logger.info(f"Bot Stockfish initialized at level {self.bot_stockfish_level}")
             logger.info(f"Suggestion Stockfish initialized at level {self.suggestion_stockfish_level}")
@@ -72,7 +72,6 @@ class LichessHandBrainBot:
             # Set position using FEN directly
             engine.set_fen_position(fen)
             best_move = engine.get_best_move()
-            logger.info(f"{'Bot' if for_bot else 'Suggestion'} engine calculated move: {best_move} for position: {fen}")
             return best_move
         except Exception as e:
             logger.error(f"Error getting best move: {e}")
@@ -84,9 +83,7 @@ class LichessHandBrainBot:
         try:
             response = self.session.post(url, data=data)
             if response.status_code == 200:
-                logger.info(f"Chat message sent: {text}")
-                
-                # Cache the message sent by bot
+                logger.info(f"[{game_id}] Chat message sent: {text}")
                 if game_id not in self.bot_message_cache:
                     self.bot_message_cache[game_id] = []
                 self.bot_message_cache[game_id].append(text)
@@ -101,7 +98,6 @@ class LichessHandBrainBot:
         try:
             response = self.session.post(url)
             if response.status_code == 200:
-                logger.info(f"Move made: {move_uci}")
                 return True
             else:
                 logger.error(f"Failed to make move {move_uci}: {response.status_code}")
@@ -123,39 +119,28 @@ class LichessHandBrainBot:
                 return
                 
             fen = board.fen()
-            move_count = len([m for m in moves if m])
             
-            logger.info(f"Processing game state - Move #{move_count}")
-            logger.info(f"Moves so far: {' '.join(moves) if moves else 'None'}")
-            logger.info(f"Current turn: {'White' if board.turn == chess.WHITE else 'Black'}")
-            logger.info(f"Bot color: {'White' if bot_color == chess.WHITE else 'Black'}")
-            logger.info(f"Is bot's turn: {board.turn == bot_color}")
-            logger.info(f"FEN: {fen}")
+            logger.debug(f"[{game_id}] FEN: {fen}")
             
             if board.turn == bot_color:
-                # Bot's turn: make move at bot level
                 bot_move = self.get_best_move(fen, for_bot=True)
                 
                 if bot_move:
                     piece_name = self.get_piece_name(bot_move, board)
                     
                     if self.make_move(game_id, bot_move):
-                        #message = f"I'm moving my {piece_name} ({bot_move})"
-                        #self.send_chat_message(game_id, message)
-                        logger.info(f"Bot made move: {bot_move} ({piece_name})")
+                        logger.info(f"[{game_id}] Bot made move: {bot_move} ({piece_name})")
                         
             else:
-                # Opponent's turn: suggest best piece at max level (but don't make the move)
-                suggested_move = self.get_best_move(fen, for_bot=False)
-                
-                if suggested_move:
-                    piece_name = self.get_piece_name(suggested_move, board)
-                    # Get cached messages for this game to avoid repetition
-                    cached_messages = self.bot_message_cache.get(game_id, [])
-                    logger.info(f"Current cache for game {game_id}: {cached_messages}")
-                    message = self.chat.generate_move_hint_message(piece_name, cached_messages)
-                    self.send_chat_message(game_id, message)
-                    logger.info(f"Suggested to opponent: {suggested_move} ({piece_name})")
+                if fen != 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1':
+                    suggested_move = self.get_best_move(fen, for_bot=False)
+                    
+                    if suggested_move:
+                        piece_name = self.get_piece_name(suggested_move, board)
+                        cached_messages = self.bot_message_cache.get(game_id, [])
+                        message = self.chat.generate_move_hint_message(piece_name, cached_messages)
+                        self.send_chat_message(game_id, message)
+                        logger.info(f"[{game_id}] Suggested to opponent: {suggested_move} ({piece_name})")
                     
         except Exception as e:
             logger.error(f"Error handling game state: {e}")
@@ -164,10 +149,10 @@ class LichessHandBrainBot:
         url = f"{self.base_url}/api/bot/game/stream/{game_id}"
         bot_color = None
 
-        # Get cached messages for this game to avoid repetition
         cached_messages = self.bot_message_cache.get(game_id, [])
-        message = self.chat.generate_chat_response("Let's have a great game! Make your move soon!", cached_messages)
-        self.send_chat_message(game_id, message)
+        self.send_chat_message(game_id, f"Hello! I'm {self.bot_username}! I will give you hints for your best move, but I'll only tell you the name of the piece you should move.")
+        self.send_chat_message(game_id, f"Let's have a great game!")
+
         
         try:
             with self.session.get(url, stream=True) as response:
@@ -178,21 +163,15 @@ class LichessHandBrainBot:
                             event_type = event.get('type')
                             
                             if event_type == 'gameFull':
-                                # Determine bot's color from the game info
                                 white_player = event.get('white', {})
                                 black_player = event.get('black', {})
-                                
-                                # Get bot's username from API
-                                profile_response = self.session.get(f"{self.base_url}/api/account")
-                                if profile_response.status_code == 200:
-                                    bot_username = profile_response.json().get('username', '')
-                                    
-                                    if white_player.get('name') == bot_username:
-                                        bot_color = chess.WHITE
-                                        logger.info(f"Bot playing as White in game {game_id}")
-                                    elif black_player.get('name') == bot_username:
-                                        bot_color = chess.BLACK
-                                        logger.info(f"Bot playing as Black in game {game_id}")
+                                                                
+                                if white_player.get('name') == self.bot_username:
+                                    bot_color = chess.WHITE
+                                    logger.info(f"[{game_id}] {self.bot_username} playing as White")
+                                elif black_player.get('name') == self.bot_username:
+                                    bot_color = chess.BLACK
+                                    logger.info(f"[{game_id}] {self.bot_username} playing as Black")
                                 
                                 initial_state = event.get('state', {})
                                 self.handle_game_state(game_id, initial_state, bot_color)
@@ -208,7 +187,6 @@ class LichessHandBrainBot:
                                 
                                     logger.info(f"Chat from {username} in {room}: {text}")
 
-                                    # Get cached messages for this game to avoid repetition
                                     cached_messages = self.bot_message_cache.get(game_id, [])
                                     logger.info(f"Current cache for game {game_id}: {cached_messages}")
                                     message = self.chat.generate_chat_response(text, cached_messages)
@@ -287,10 +265,9 @@ class LichessHandBrainBot:
         
         try:
             self.stream_events()
-        except KeyboardInterrupt:
-            logger.info("Bot stopped by user")
+
         except Exception as e:
-            logger.error(f"Bot error: {e}")
+            logger.error(f"Error: {e}")
 
 if __name__ == "__main__":
     bot = LichessHandBrainBot()
